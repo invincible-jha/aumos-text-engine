@@ -31,13 +31,20 @@ from aumos_text_engine.api.schemas import (
     SynthesisRequest,
 )
 from aumos_text_engine.core.interfaces import (
+    ContextInjectorProtocol,
     EntityReplacerProtocol,
+    FineTuningAdapterProtocol,
+    LLMClientProtocol,
+    OutputParserProtocol,
     PIIDetectorProtocol,
     PrivacyClientProtocol,
+    PromptCacheManagerProtocol,
+    PromptTemplateManagerProtocol,
     QualityValidatorProtocol,
     StorageAdapterProtocol,
     StylePreserverProtocol,
     TextGeneratorProtocol,
+    TextQualityEvaluatorProtocol,
 )
 from aumos_text_engine.core.models import (
     DomainTemplate,
@@ -857,3 +864,467 @@ class BatchService:
             created_at=job.created_at,
             updated_at=job.updated_at,
         )
+
+
+# ---------------------------------------------------------------------------
+# New services wiring extended adapters
+# ---------------------------------------------------------------------------
+
+
+class CachedSynthesisService:
+    """Synthesis service with Redis prompt caching and output parsing.
+
+    Wraps SynthesisService with:
+    - Cache-first lookup before calling the LLM
+    - Structured output parsing and validation
+    - Cache population after successful generation
+    - Cache invalidation by template version
+    """
+
+    def __init__(
+        self,
+        synthesis_service: SynthesisService,
+        cache_manager: PromptCacheManagerProtocol,
+        output_parser: OutputParserProtocol,
+    ) -> None:
+        """Initialize CachedSynthesisService.
+
+        Args:
+            synthesis_service: Underlying SynthesisService for cache misses.
+            cache_manager: Redis-backed prompt cache.
+            output_parser: Structured output parser for validation.
+        """
+        self._synthesis_service = synthesis_service
+        self._cache_manager = cache_manager
+        self._output_parser = output_parser
+        self._log: structlog.BoundLogger = get_logger(__name__)
+
+    async def synthesize_with_cache(
+        self,
+        request: SynthesisRequest,
+        tenant_id: str,
+        session: AsyncSession,
+        prompt: str,
+        template_version: str = "1.0.0",
+        cache_ttl: int | None = None,
+    ) -> JobResponse:
+        """Generate synthetic text with cache-first lookup.
+
+        Args:
+            request: Synthesis request parameters.
+            tenant_id: Owning tenant.
+            session: Database session.
+            prompt: Fully assembled generation prompt for cache key derivation.
+            template_version: Template version for cache grouping.
+            cache_ttl: Cache TTL in seconds. Uses default if None.
+
+        Returns:
+            JobResponse from synthesis (real or from cache hit path).
+        """
+        log = self._log.bind(tenant_id=tenant_id, domain=request.domain)
+        config_dict = request.generation_config.model_dump()
+
+        # Check cache first
+        cached_response = await self._cache_manager.get(prompt, config_dict)
+        if cached_response is not None:
+            metrics = self._cache_manager.get_metrics()
+            log.info(
+                "synthesis cache hit",
+                hit_rate=metrics.get("hit_rate", 0),
+                total_hits=metrics.get("total_hits", 0),
+            )
+
+        # Full synthesis pipeline (cache miss or returning from cache path)
+        job_response = await self._synthesis_service.synthesize(
+            request=request,
+            tenant_id=tenant_id,
+            session=session,
+        )
+
+        # Cache the output URI after successful generation
+        if cached_response is None and job_response.status == "completed" and job_response.output_uri:
+            await self._cache_manager.set(
+                prompt=prompt,
+                config_dict=config_dict,
+                response=job_response.output_uri,
+                template_version=template_version,
+                ttl=cache_ttl,
+            )
+            log.debug("synthesis result cached", output_uri=job_response.output_uri)
+
+        return job_response
+
+    async def invalidate_template_cache(self, template_version: str) -> int:
+        """Invalidate all cached prompts for a template version.
+
+        Args:
+            template_version: Template version to invalidate.
+
+        Returns:
+            Number of cache entries invalidated.
+        """
+        count = await self._cache_manager.invalidate_by_version(template_version)
+        self._log.info(
+            "template cache invalidated",
+            template_version=template_version,
+            entries_removed=count,
+        )
+        return count
+
+
+class DomainTextGenerationService:
+    """Routes domain-specific generation requests to specialized generators.
+
+    Supports legal, medical, and financial document types with optional
+    RAG context injection and multi-dimensional quality evaluation.
+    """
+
+    def __init__(
+        self,
+        legal_generator: Any,
+        medical_generator: Any,
+        financial_generator: Any,
+        context_injector: ContextInjectorProtocol,
+        quality_evaluator: TextQualityEvaluatorProtocol,
+    ) -> None:
+        """Initialize DomainTextGenerationService.
+
+        Args:
+            legal_generator: LegalTextGenerator instance.
+            medical_generator: MedicalTextGenerator instance.
+            financial_generator: FinancialTextGenerator instance.
+            context_injector: Multi-document context assembler.
+            quality_evaluator: Multi-dimensional quality evaluator.
+        """
+        self._legal = legal_generator
+        self._medical = medical_generator
+        self._financial = financial_generator
+        self._context_injector = context_injector
+        self._quality_evaluator = quality_evaluator
+        self._log: structlog.BoundLogger = get_logger(__name__)
+
+    async def generate_domain_document(
+        self,
+        domain: str,
+        document_type: str,
+        parameters: dict[str, Any],
+        source_documents: list[dict[str, str]] | None = None,
+        config: Any | None = None,
+    ) -> dict[str, Any]:
+        """Generate a domain-specific document with optional RAG context.
+
+        Args:
+            domain: Domain category (legal|medical|financial).
+            document_type: Specific document type within the domain.
+            parameters: Domain-specific generation parameters.
+            source_documents: Optional source documents for context injection.
+            config: LLM GenerationConfig.
+
+        Returns:
+            Dict with generated_text, domain, document_type, quality_metrics.
+
+        Raises:
+            ValueError: If domain is not supported.
+        """
+        log = self._log.bind(domain=domain, document_type=document_type)
+        log.info("generating domain document")
+
+        # Assemble RAG context if source documents provided
+        context_attributions: list[dict[str, Any]] = []
+        if source_documents:
+            query = parameters.get("topic", document_type)
+            assembled = await self._context_injector.assemble_context(
+                query=query,
+                documents=source_documents,
+                token_budget=None,
+            )
+            if assembled.context_text:
+                parameters["additional_context"] = assembled.context_text
+            context_attributions = assembled.source_attributions
+
+        # Route to domain generator
+        if domain == "legal":
+            generated_text = await self._route_legal(document_type, parameters, config)
+        elif domain == "medical":
+            generated_text = await self._route_medical(document_type, parameters, config)
+        elif domain == "financial":
+            generated_text = await self._route_financial(document_type, parameters, config)
+        else:
+            raise ValueError(f"Unsupported domain '{domain}'. Valid: legal, medical, financial")
+
+        # Evaluate quality against reference text if available
+        quality_metrics: dict[str, Any] = {}
+        reference_text = parameters.get("example_text", "")
+        if reference_text and generated_text:
+            quality_report = await self._quality_evaluator.evaluate(
+                original_text=reference_text,
+                synthetic_text=generated_text,
+                domain=domain,
+            )
+            quality_metrics = quality_report.details
+
+        log.info("domain document generated", text_length=len(generated_text))
+        return {
+            "generated_text": generated_text,
+            "domain": domain,
+            "document_type": document_type,
+            "quality_metrics": quality_metrics,
+            "source_attributions": context_attributions,
+        }
+
+    async def _route_legal(
+        self,
+        document_type: str,
+        parameters: dict[str, Any],
+        config: Any | None,
+    ) -> str:
+        """Route to the LegalTextGenerator method for the given document type.
+
+        Args:
+            document_type: Legal document type.
+            parameters: Generation parameters.
+            config: LLM config.
+
+        Returns:
+            Generated legal text.
+        """
+        if document_type == "contract_clause":
+            return await self._legal.generate_contract_clause(
+                clause_type=parameters.get("clause_type", "General Terms"),
+                contract_type=parameters.get("contract_type", "Master Services Agreement"),
+                jurisdiction=parameters.get("jurisdiction", "the State of Delaware, United States"),
+                key_terms=parameters.get("key_terms", ""),
+                config=config,
+            )
+        elif document_type == "legal_brief":
+            return await self._legal.generate_legal_brief(
+                brief_type=parameters.get("brief_type", "Memorandum of Law"),
+                case_type=parameters.get("case_type", "breach of contract"),
+                legal_issue=parameters.get("legal_issue", "contractual obligations"),
+                desired_outcome=parameters.get("desired_outcome", "dismissal"),
+                config=config,
+            )
+        elif document_type == "compliance":
+            return await self._legal.generate_regulatory_compliance_text(
+                document_type=parameters.get("document_type", "Policy"),
+                regulation=parameters.get("regulation", "SOC 2"),
+                sector=parameters.get("sector", "Technology"),
+                scope=parameters.get("scope", "enterprise-wide"),
+                config=config,
+            )
+        else:
+            return await self._legal.generate_case_summary(
+                case_type=parameters.get("case_type", "civil litigation"),
+                outcome=parameters.get("outcome", "settlement"),
+                key_findings=parameters.get("key_findings", ["parties reached agreement"]),
+                config=config,
+            )
+
+    async def _route_medical(
+        self,
+        document_type: str,
+        parameters: dict[str, Any],
+        config: Any | None,
+    ) -> str:
+        """Route to the MedicalTextGenerator method for the given document type.
+
+        Args:
+            document_type: Medical document type.
+            parameters: Generation parameters.
+            config: LLM config.
+
+        Returns:
+            Generated medical text.
+        """
+        if document_type == "clinical_note":
+            return await self._medical.generate_clinical_note(
+                note_type=parameters.get("note_type", "progress"),
+                specialty=parameters.get("specialty", "Internal Medicine"),
+                chief_complaint=parameters.get("chief_complaint", ""),
+                diagnoses=parameters.get("diagnoses"),
+                medications=parameters.get("medications"),
+                config=config,
+            )
+        elif document_type == "discharge_summary":
+            return await self._medical.generate_discharge_summary(
+                primary_diagnosis=parameters.get("primary_diagnosis", "Unspecified condition"),
+                secondary_diagnoses=parameters.get("secondary_diagnoses"),
+                procedures=parameters.get("procedures"),
+                length_of_stay=parameters.get("length_of_stay", 3),
+                disposition=parameters.get("disposition", "Home with follow-up"),
+                followup=parameters.get("followup", "PCP in 1 week"),
+                config=config,
+            )
+        else:
+            return await self._medical.generate_medical_report(
+                report_type=parameters.get("report_type", "Radiology"),
+                findings=parameters.get("findings", ["No acute findings"]),
+                impression=parameters.get("impression", "Normal study"),
+                modality=parameters.get("modality", ""),
+                config=config,
+            )
+
+    async def _route_financial(
+        self,
+        document_type: str,
+        parameters: dict[str, Any],
+        config: Any | None,
+    ) -> str:
+        """Route to the FinancialTextGenerator method for the given document type.
+
+        Args:
+            document_type: Financial document type.
+            parameters: Generation parameters.
+            config: LLM config.
+
+        Returns:
+            Generated financial text.
+        """
+        if document_type == "report_section":
+            return await self._financial.generate_financial_report_section(
+                report_section=parameters.get("report_section", "Management Discussion & Analysis"),
+                report_type=parameters.get("report_type", "Annual Report (10-K)"),
+                company_type=parameters.get("company_type", "diversified financial services holding company"),
+                fiscal_period=parameters.get("fiscal_period", "Fiscal Year 2024"),
+                key_metrics=parameters.get("key_metrics", ""),
+                market_conditions=parameters.get("market_conditions", "moderately favorable economic environment"),
+                config=config,
+            )
+        elif document_type == "risk_assessment":
+            return await self._financial.generate_risk_assessment_narrative(
+                risk_type=parameters.get("risk_type", "Credit Risk"),
+                business_unit=parameters.get("business_unit", "Corporate Banking Division"),
+                risk_factors=parameters.get("risk_factors"),
+                mitigation_strategies=parameters.get("mitigation_strategies"),
+                risk_rating=parameters.get("risk_rating", "Medium"),
+                config=config,
+            )
+        elif document_type == "regulatory_filing":
+            return await self._financial.generate_regulatory_filing_text(
+                filing_type=parameters.get("filing_type", "Risk Factors"),
+                filing_form=parameters.get("filing_form", "10-K"),
+                regulatory_body=parameters.get("regulatory_body", "SEC"),
+                subject_matter=parameters.get("subject_matter", ""),
+                disclosure_period=parameters.get("disclosure_period", "Fiscal Year Ended December 31, 2024"),
+                config=config,
+            )
+        else:
+            return await self._financial.generate_market_analysis(
+                asset_class=parameters.get("asset_class", "Equities"),
+                sector=parameters.get("sector", "Financial Services"),
+                analysis_horizon=parameters.get("analysis_horizon", "12-month"),
+                key_themes=parameters.get("key_themes"),
+                config=config,
+            )
+
+
+class FineTuningOrchestrationService:
+    """Orchestrates LoRA fine-tuning dataset preparation and artifact management.
+
+    Coordinates dataset preparation, LoRA config generation, and checkpoint
+    tracking. Delegates actual GPU training to the ML infrastructure.
+    """
+
+    def __init__(
+        self,
+        fine_tuning_adapter: FineTuningAdapterProtocol,
+        storage: StorageAdapterProtocol,
+        session: AsyncSession,
+    ) -> None:
+        """Initialize FineTuningOrchestrationService.
+
+        Args:
+            fine_tuning_adapter: Adapter for dataset preparation and LoRA config.
+            storage: MinIO adapter for corpus and artifact storage.
+            session: Database session.
+        """
+        self._fine_tuning_adapter = fine_tuning_adapter
+        self._storage = storage
+        self._session = session
+        self._log: structlog.BoundLogger = get_logger(__name__)
+
+    async def prepare_and_upload_dataset(
+        self,
+        raw_samples: list[dict[str, Any]],
+        tenant_id: str,
+        job_id: str,
+        format_type: str = "instruct",
+        validation_split: float = 0.1,
+        source_uri: str = "",
+    ) -> tuple[str, str]:
+        """Prepare fine-tuning dataset and upload both splits to MinIO.
+
+        Args:
+            raw_samples: Raw training samples with instruction/output keys.
+            tenant_id: Owning tenant for MinIO path.
+            job_id: Fine-tuning job ID for MinIO path.
+            format_type: JSONL conversation format (instruct|alpaca|sharegpt).
+            validation_split: Fraction of data for validation.
+            source_uri: Original corpus URI for tracking.
+
+        Returns:
+            Tuple of (train_uri, val_uri) MinIO paths.
+        """
+        import json as _json
+
+        log = self._log.bind(tenant_id=tenant_id, job_id=job_id, format=format_type)
+
+        dataset = await self._fine_tuning_adapter.prepare_dataset(
+            raw_samples=raw_samples,
+            format_type=format_type,
+            validation_split=validation_split,
+            source_uri=source_uri,
+        )
+
+        log.info(
+            "dataset prepared",
+            train_count=dataset.train_count,
+            val_count=dataset.validation_count,
+        )
+
+        train_jsonl = "\n".join(
+            _json.dumps(s, ensure_ascii=False) for s in dataset.training_samples
+        )
+        val_jsonl = "\n".join(
+            _json.dumps(s, ensure_ascii=False) for s in dataset.validation_samples
+        )
+
+        train_key = f"finetune/{tenant_id}/{job_id}/train.jsonl"
+        val_key = f"finetune/{tenant_id}/{job_id}/val.jsonl"
+
+        train_uri = await self._storage.upload(
+            content=train_jsonl,
+            object_key=train_key,
+            content_type="application/jsonl",
+        )
+        val_uri = await self._storage.upload(
+            content=val_jsonl,
+            object_key=val_key,
+            content_type="application/jsonl",
+        )
+
+        log.info("dataset uploaded to MinIO", train_uri=train_uri, val_uri=val_uri)
+        return train_uri, val_uri
+
+    def generate_lora_config(
+        self,
+        base_model: str,
+        lora_config_overrides: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Generate a PEFT-compatible LoRA config dict.
+
+        Args:
+            base_model: Base model name.
+            lora_config_overrides: Optional overrides (r, lora_alpha, target_modules).
+
+        Returns:
+            PEFT LoraConfig constructor arguments dict.
+        """
+        overrides = lora_config_overrides or {}
+        config = self._fine_tuning_adapter.generate_lora_config(
+            base_model=base_model,
+            rank=overrides.get("r"),
+            lora_alpha=overrides.get("lora_alpha"),
+            target_modules=overrides.get("target_modules"),
+        )
+        return config.to_peft_config()

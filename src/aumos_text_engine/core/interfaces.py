@@ -16,6 +16,11 @@ from aumos_text_engine.api.schemas import (
 )
 
 
+# ---------------------------------------------------------------------------
+# Core adapter protocols (original)
+# ---------------------------------------------------------------------------
+
+
 @runtime_checkable
 class PIIDetectorProtocol(Protocol):
     """Detects PII entities in text using NER and pattern matching."""
@@ -73,7 +78,7 @@ class EntityReplacerProtocol(Protocol):
         ...
 
     def get_replacement_mapping(self) -> dict[str, str]:
-        """Return the mapping of original → replacement values used so far.
+        """Return the mapping of original -> replacement values used so far.
 
         Args:
             None
@@ -266,5 +271,414 @@ class PrivacyClientProtocol(Protocol):
 
         Returns:
             None
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Extended adapter protocols — new capabilities
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class LLMClientProtocol(Protocol):
+    """Unified async LLM client supporting vLLM, Ollama, and LiteLLM backends."""
+
+    async def generate(self, prompt: str, config: GenerationConfig) -> str:
+        """Generate text from a prompt.
+
+        Args:
+            prompt: Full generation prompt.
+            config: Generation parameters.
+
+        Returns:
+            Generated text string.
+        """
+        ...
+
+    async def generate_structured(
+        self,
+        prompt: str,
+        config: GenerationConfig,
+        json_schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Generate structured JSON output validated against a schema.
+
+        Args:
+            prompt: Generation prompt.
+            config: Generation parameters.
+            json_schema: JSON schema describing expected output.
+
+        Returns:
+            Parsed and validated JSON dict.
+        """
+        ...
+
+    def estimate_token_count(self, text: str) -> int:
+        """Estimate token count for a given text string.
+
+        Args:
+            text: Input text to estimate.
+
+        Returns:
+            Estimated token count.
+        """
+        ...
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
+        ...
+
+
+@runtime_checkable
+class PromptTemplateManagerProtocol(Protocol):
+    """Domain-specific prompt template registry with variable substitution."""
+
+    def get_template(self, template_id: str) -> Any:
+        """Retrieve a template by ID.
+
+        Args:
+            template_id: Template identifier.
+
+        Returns:
+            PromptTemplate object.
+        """
+        ...
+
+    def render(
+        self,
+        template_id: str,
+        variables: dict[str, Any],
+        include_few_shot: bool = True,
+    ) -> str:
+        """Render a template to a single prompt string.
+
+        Args:
+            template_id: Template to render.
+            variables: Variable substitution dict.
+            include_few_shot: Whether to inject few-shot examples.
+
+        Returns:
+            Rendered prompt string.
+        """
+        ...
+
+    def list_templates(self, domain: str | None = None) -> list[dict[str, str]]:
+        """List all registered templates.
+
+        Args:
+            domain: Optional domain filter (legal|medical|financial|general).
+
+        Returns:
+            List of template metadata dicts.
+        """
+        ...
+
+
+@runtime_checkable
+class TextQualityEvaluatorProtocol(Protocol):
+    """Multi-dimensional text quality evaluator with semantic and linguistic metrics."""
+
+    async def initialize(self) -> None:
+        """Load embedding models.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
+        ...
+
+    async def validate(self, original_text: str, synthetic_text: str) -> QualityReport:
+        """Validate quality between original and synthetic text.
+
+        Args:
+            original_text: Reference document (after PII replacement).
+            synthetic_text: Generated document to evaluate.
+
+        Returns:
+            QualityReport with semantic similarity and pass/fail status.
+        """
+        ...
+
+    async def evaluate(
+        self,
+        original_text: str,
+        synthetic_text: str,
+        domain: str,
+    ) -> QualityReport:
+        """Full multi-dimensional quality evaluation.
+
+        Args:
+            original_text: Reference document.
+            synthetic_text: Generated document.
+            domain: Domain for domain-specific quality scoring.
+
+        Returns:
+            QualityReport with all quality dimensions and aggregate score.
+        """
+        ...
+
+
+@runtime_checkable
+class ContextInjectorProtocol(Protocol):
+    """Multi-document context assembler for retrieval-augmented generation."""
+
+    async def initialize(self) -> None:
+        """Load ranking models.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
+        ...
+
+    async def assemble_context(
+        self,
+        query: str,
+        documents: list[dict[str, str]],
+        token_budget: int | None,
+    ) -> Any:
+        """Assemble relevant context from multiple documents for a generation query.
+
+        Args:
+            query: Generation query or topic hint.
+            documents: Source documents (dicts with id, name, text keys).
+            token_budget: Maximum total context tokens.
+
+        Returns:
+            AssembledContext with formatted context string and source attributions.
+        """
+        ...
+
+    async def chunk_document(
+        self,
+        text: str,
+        source_id: str,
+        source_name: str,
+    ) -> list[Any]:
+        """Split a document into overlapping chunks.
+
+        Args:
+            text: Document text to chunk.
+            source_id: Document identifier.
+            source_name: Human-readable document name.
+
+        Returns:
+            List of DocumentChunk objects.
+        """
+        ...
+
+
+@runtime_checkable
+class PromptCacheManagerProtocol(Protocol):
+    """Redis-backed prompt/response cache with semantic approximate matching."""
+
+    async def initialize(self) -> None:
+        """Connect to Redis and load embedding models.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
+        ...
+
+    async def get(self, prompt: str, config_dict: dict[str, Any]) -> str | None:
+        """Look up a cached response for the given prompt and config.
+
+        Args:
+            prompt: Generation prompt to look up.
+            config_dict: Config dict for cache key derivation.
+
+        Returns:
+            Cached response string, or None if not found.
+        """
+        ...
+
+    async def set(
+        self,
+        prompt: str,
+        config_dict: dict[str, Any],
+        response: str,
+        template_version: str,
+        ttl: int | None,
+    ) -> None:
+        """Store a prompt/response pair in the cache.
+
+        Args:
+            prompt: Generation prompt.
+            config_dict: Config dict.
+            response: LLM response to cache.
+            template_version: Template version tag for batch invalidation.
+            ttl: Cache TTL in seconds. Uses default if None.
+
+        Returns:
+            None
+        """
+        ...
+
+    async def invalidate_by_version(self, template_version: str) -> int:
+        """Invalidate all cache entries for a template version.
+
+        Args:
+            template_version: Template version to invalidate.
+
+        Returns:
+            Number of entries invalidated.
+        """
+        ...
+
+    def get_metrics(self) -> dict[str, Any]:
+        """Return current cache hit/miss/memory metrics.
+
+        Args:
+            None
+
+        Returns:
+            Metrics dict with total_hits, total_misses, hit_rate, etc.
+        """
+        ...
+
+    async def close(self) -> None:
+        """Close the Redis connection.
+
+        Args:
+            None
+
+        Returns:
+            None
+        """
+        ...
+
+
+@runtime_checkable
+class OutputParserProtocol(Protocol):
+    """Structured LLM output parser with JSON schema validation."""
+
+    def sanitize(self, raw_text: str) -> str:
+        """Remove markdown artifacts and normalize LLM output.
+
+        Args:
+            raw_text: Raw LLM output string.
+
+        Returns:
+            Sanitized text with fences and preamble removed.
+        """
+        ...
+
+    def parse_json(self, raw_text: str) -> dict[str, Any]:
+        """Parse JSON from LLM output using multiple extraction strategies.
+
+        Args:
+            raw_text: Raw LLM output containing JSON.
+
+        Returns:
+            Parsed JSON dict.
+        """
+        ...
+
+    def parse_and_validate(
+        self,
+        raw_text: str,
+        schema: dict[str, Any],
+        format_type: str,
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Parse output and validate against a JSON schema.
+
+        Args:
+            raw_text: Raw LLM output.
+            schema: JSON schema to validate against.
+            format_type: Expected format ("json" or "yaml").
+
+        Returns:
+            Tuple of (parsed_data, validation_errors).
+        """
+        ...
+
+    def build_retry_prompt(
+        self,
+        original_prompt: str,
+        failed_output: str,
+        validation_errors: list[str],
+        schema: dict[str, Any],
+    ) -> str:
+        """Build a retry prompt after schema validation failure.
+
+        Args:
+            original_prompt: Original generation prompt.
+            failed_output: Invalid output from previous attempt.
+            validation_errors: List of validation error messages.
+            schema: Expected output schema.
+
+        Returns:
+            Augmented retry prompt string.
+        """
+        ...
+
+
+@runtime_checkable
+class FineTuningAdapterProtocol(Protocol):
+    """LoRA fine-tuning dataset preparation and checkpoint tracking."""
+
+    async def prepare_dataset(
+        self,
+        raw_samples: list[dict[str, Any]],
+        format_type: str,
+        validation_split: float,
+        source_uri: str,
+    ) -> Any:
+        """Prepare a training dataset from raw text samples.
+
+        Args:
+            raw_samples: Raw sample dicts with instruction/output keys.
+            format_type: Target format (instruct|alpaca|sharegpt).
+            validation_split: Fraction of data to reserve for validation.
+            source_uri: Original corpus URI for tracking.
+
+        Returns:
+            TrainingDataset with formatted training and validation splits.
+        """
+        ...
+
+    def generate_lora_config(
+        self,
+        base_model: str,
+        rank: int | None,
+        lora_alpha: int | None,
+        target_modules: list[str] | None,
+    ) -> Any:
+        """Generate a LoRA configuration for the given base model.
+
+        Args:
+            base_model: Base model name (e.g. llama3-8b-instruct).
+            rank: LoRA rank (r). Auto-selected if None.
+            lora_alpha: Scaling factor. Defaults to 2x rank.
+            target_modules: Module names to apply LoRA. Auto-detected if None.
+
+        Returns:
+            LoRAConfig with all parameters set.
+        """
+        ...
+
+    def get_best_checkpoint(self, job_id: str) -> Any | None:
+        """Return the best training checkpoint for a fine-tuning job.
+
+        Args:
+            job_id: Fine-tuning job identifier.
+
+        Returns:
+            CheckpointInfo for the best checkpoint, or None if none recorded.
         """
         ...
