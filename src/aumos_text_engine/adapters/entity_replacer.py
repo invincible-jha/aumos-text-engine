@@ -434,3 +434,106 @@ class ContextAwareEntityReplacer:
             Dict mapping original PII values to their fake replacements.
         """
         return dict(self._replacement_mapping)
+
+
+class LocalizedEntityReplacer(ContextAwareEntityReplacer):
+    """Context-aware PII entity replacement with locale support.
+
+    Extends ContextAwareEntityReplacer to use Faker with locale-appropriate
+    data generators. German text gets German fake names; French text gets
+    French fake names, etc.
+
+    Args:
+        seed: Optional random seed for reproducible replacements.
+    """
+
+    LOCALE_MAP: dict[str, str] = {
+        "en": "en_US",
+        "de": "de_DE",
+        "fr": "fr_FR",
+        "es": "es_ES",
+        "it": "it_IT",
+        "pt": "pt_BR",
+        "nl": "nl_NL",
+        "pl": "pl_PL",
+        "ru": "ru_RU",
+        "zh": "zh_CN",
+    }
+
+    def __init__(self, seed: int | None = None) -> None:
+        """Initialize the localized entity replacer.
+
+        Args:
+            seed: Optional random seed for reproducible replacements.
+        """
+        super().__init__(seed=seed)
+        self._faker_cache: dict[str, object] = {}
+
+    def get_faker_for_language(self, language: str) -> object:
+        """Return a Faker instance configured for the given language locale.
+
+        Caches faker instances per locale to avoid repeated instantiation.
+
+        Args:
+            language: ISO-639-1 language code (e.g., "de", "fr").
+
+        Returns:
+            Faker instance configured with the appropriate locale.
+        """
+        try:
+            from faker import Faker as FakerLib
+        except ImportError:
+            return None  # type: ignore[return-value]
+
+        locale = self.LOCALE_MAP.get(language, "en_US")
+        if locale not in self._faker_cache:
+            self._faker_cache[locale] = FakerLib(locale)
+        return self._faker_cache[locale]
+
+    async def replace_localized(
+        self,
+        text: str,
+        entities: list["PIIEntity"],
+        language: str = "en",
+        strategy: str = "entity_aware",
+    ) -> "PIIReplaceResult":
+        """Replace PII entities using locale-appropriate fake data.
+
+        Uses Faker with the appropriate locale for person names, addresses,
+        and other locale-sensitive entity types. Falls back to the base
+        replace() method if Faker is unavailable.
+
+        Args:
+            text: Original text containing PII.
+            entities: Detected PII entities.
+            language: ISO-639-1 language code for locale selection.
+            strategy: Replacement strategy (entity_aware | mask | random).
+
+        Returns:
+            PIIReplaceResult with locale-appropriate anonymized text.
+        """
+        faker = self.get_faker_for_language(language)
+        if faker is None:
+            return await self.replace(text=text, entities=entities, strategy=strategy)
+
+        # Pre-populate locale-aware replacements for person names and locations
+        for entity in entities:
+            original_value = text[entity.start : entity.end]
+            if original_value not in self._replacement_mapping and strategy == "entity_aware":
+                if entity.entity_type == "PERSON":
+                    try:
+                        self._replacement_mapping[original_value] = faker.name()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                elif entity.entity_type == "LOCATION":
+                    try:
+                        self._replacement_mapping[original_value] = faker.city()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                elif entity.entity_type == "ORGANIZATION":
+                    try:
+                        self._replacement_mapping[original_value] = faker.company()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+
+        return await self.replace(text=text, entities=entities, strategy=strategy)
