@@ -16,6 +16,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Enum,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -231,3 +232,28 @@ class FineTuneJob(AumOSModel, TimestampMixin, Base):  # type: ignore[misc]
         nullable=True,
     )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class CustomEntityType(AumOSModel, TimestampMixin, Base):  # type: ignore[misc]
+    """Tenant-defined PII entity type with detection patterns.
+
+    Allows tenants to register custom sensitive data patterns (e.g., NPI numbers,
+    project code names) that are not in Presidio's built-in recognizer set.
+
+    Attributes:
+        name: Unique entity type name within the tenant (e.g., "PHYSICIAN_NPI").
+        patterns: List of regex pattern strings for detection.
+        context_words: Words near the entity that increase detection confidence.
+        deny_list: Exact strings to always flag as this entity type.
+        score: Default confidence score when a pattern matches (0-1).
+        enabled: Soft-delete flag; False means the type is disabled.
+    """
+
+    __tablename__ = "txt_custom_entity_types"
+
+    name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    patterns: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    context_words: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    deny_list: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    score: Mapped[float] = mapped_column(Float, nullable=False, default=0.85)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)

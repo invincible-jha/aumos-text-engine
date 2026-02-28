@@ -31,9 +31,18 @@ dependencies = [
     "opentelemetry-sdk>=1.23.0",
     "torch>=2.2.0",
     "sentence-transformers>=2.7.0",
+    # GAP-71: Multilingual PII detection
+    "langdetect>=1.0.9",
+    "faker>=24.0.0",
+    # GAP-72: Streaming large documents (no extra deps beyond stdlib)
+    # GAP-73: Custom entity registry (presidio already in deps)
+    # GAP-74: Template library (no extra deps)
 ]
 
 [project.optional-dependencies]
+benchmarks = [
+    "bert-score>=0.3.13",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

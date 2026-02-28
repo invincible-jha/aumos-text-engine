@@ -1328,3 +1328,391 @@ class FineTuningOrchestrationService:
             target_modules=overrides.get("target_modules"),
         )
         return config.to_peft_config()
+
+
+# ---------------------------------------------------------------------------
+# GAP-72: StreamingSynthesisService — large document processing
+# ---------------------------------------------------------------------------
+
+
+class StreamingSynthesisService:
+    """PII detection and replacement for documents exceeding memory limits.
+
+    Splits large documents into semantic chunks, processes each chunk
+    independently, and reassembles the output. Maintains an entity registry
+    across chunks to ensure consistent replacement (same real entity always
+    maps to same fake entity within a job).
+
+    Args:
+        pii_detector: MultilingualPIIDetector or PresidioPIIDetector.
+        entity_replacer: LocalizedEntityReplacer or ContextAwareEntityReplacer.
+        chunker: DocumentChunker for splitting large documents.
+        storage: MinIO/local storage adapter.
+    """
+
+    def __init__(
+        self,
+        pii_detector: Any,
+        entity_replacer: Any,
+        chunker: Any,
+        storage: StorageAdapterProtocol,
+    ) -> None:
+        """Initialize StreamingSynthesisService.
+
+        Args:
+            pii_detector: PII detection adapter with detect() method.
+            entity_replacer: Entity replacement adapter with replace() method.
+            chunker: DocumentChunker for splitting documents into chunks.
+            storage: Storage adapter for uploading chunk outputs.
+        """
+        self._pii_detector = pii_detector
+        self._entity_replacer = entity_replacer
+        self._chunker = chunker
+        self._storage = storage
+        self._log: structlog.BoundLogger = get_logger(__name__)
+
+    async def process_streaming(
+        self,
+        job_id: uuid.UUID,
+        text: str,
+        mode: str = "pii_replace",
+        language: str | None = None,
+        tenant_id: uuid.UUID | None = None,
+    ) -> str:
+        """Process a large document in chunks and return reassembled output URI.
+
+        Maintains entity_registry across all chunks so the same real PII value
+        always gets the same fake replacement throughout the document.
+
+        Args:
+            job_id: Job identifier for output path construction.
+            text: Full document text to process.
+            mode: Processing mode — "pii_replace" or "redact".
+            language: ISO-639-1 language code, or None to auto-detect.
+            tenant_id: Owning tenant for storage path scoping.
+
+        Returns:
+            MinIO/local URI of the reassembled output document.
+        """
+        from aumos_text_engine.adapters.document_chunker import DocumentChunker
+
+        log = self._log.bind(job_id=str(job_id), mode=mode)
+        log.info("starting streaming synthesis", text_len=len(text))
+
+        # Cross-chunk entity consistency registry
+        entity_registry: dict[str, str] = {}
+        output_parts: list[str] = []
+
+        chunks = self._chunker.chunk(text)
+        log.info("document chunked", num_chunks=len(chunks))
+
+        for chunk in chunks:
+            processed_text = await self._process_chunk(
+                chunk_text=chunk.text,
+                entity_registry=entity_registry,
+                mode=mode,
+                language=language,
+            )
+            # Trim overlap regions from output
+            if chunk.overlap_start > 0:
+                processed_text = processed_text[chunk.overlap_start:]
+            if chunk.overlap_end > 0:
+                processed_text = processed_text[: len(processed_text) - chunk.overlap_end]
+
+            part_key = f"txt-jobs/{job_id}/part_{chunk.chunk_index:04d}.txt"
+            uri = await self._storage.upload(
+                content=processed_text,
+                object_key=part_key,
+                content_type="text/plain",
+            )
+            output_parts.append(uri)
+
+        # Assemble all parts into a single output
+        return await self._assemble_output(output_parts, job_id)
+
+    async def _process_chunk(
+        self,
+        chunk_text: str,
+        entity_registry: dict[str, str],
+        mode: str,
+        language: str | None,
+    ) -> str:
+        """Process a single document chunk with entity registry injection.
+
+        Args:
+            chunk_text: Text of this chunk (may include overlap).
+            entity_registry: Shared registry mapping real→fake values.
+            mode: Processing mode.
+            language: Language code.
+
+        Returns:
+            Processed chunk text with PII replaced.
+        """
+        # Detect PII
+        if hasattr(self._pii_detector, "detect") and language is not None:
+            try:
+                # MultilingualPIIDetector returns (lang, entities)
+                detected_result = await self._pii_detector.detect(
+                    text=chunk_text, language=language
+                )
+                if isinstance(detected_result, tuple):
+                    _, entities = detected_result
+                else:
+                    entities = detected_result
+            except Exception:
+                entities = await self._pii_detector.detect(text=chunk_text)
+        else:
+            raw = await self._pii_detector.detect(text=chunk_text)
+            entities = raw[1] if isinstance(raw, tuple) else raw
+
+        if mode == "redact":
+            strategy = "mask"
+        else:
+            strategy = "entity_aware"
+
+        # Pre-seed entity replacer with registry to preserve cross-chunk consistency
+        if hasattr(self._entity_replacer, "_replacement_mapping"):
+            self._entity_replacer._replacement_mapping.update(entity_registry)
+
+        replace_result = await self._entity_replacer.replace(
+            text=chunk_text,
+            entities=entities,
+            strategy=strategy,
+        )
+
+        # Update registry with any new replacements discovered in this chunk
+        if hasattr(self._entity_replacer, "_replacement_mapping"):
+            entity_registry.update(self._entity_replacer._replacement_mapping)
+
+        return replace_result.anonymized_text
+
+    async def _assemble_output(
+        self,
+        part_uris: list[str],
+        job_id: uuid.UUID,
+    ) -> str:
+        """Concatenate all output parts into a single document and upload.
+
+        Args:
+            part_uris: Ordered list of chunk output URIs.
+            job_id: Job identifier for final output path.
+
+        Returns:
+            URI of the assembled final document.
+        """
+        assembled_parts: list[str] = []
+        for uri in part_uris:
+            content = await self._storage.download(uri)
+            if isinstance(content, bytes):
+                assembled_parts.append(content.decode("utf-8"))
+            else:
+                assembled_parts.append(str(content))
+
+        assembled_text = "\n".join(assembled_parts)
+        final_key = f"txt-jobs/{job_id}/output.txt"
+        return await self._storage.upload(
+            content=assembled_text,
+            object_key=final_key,
+            content_type="text/plain",
+        )
+
+
+# ---------------------------------------------------------------------------
+# GAP-73: CustomEntityRegistryService — tenant-defined PII types
+# ---------------------------------------------------------------------------
+
+
+class CustomEntityRegistryService:
+    """Manages tenant-defined PII entity types and loads them into Presidio.
+
+    Tenants can define custom entity types with regex patterns, context words,
+    and deny lists. These are loaded into the Presidio AnalyzerEngine's
+    PatternRecognizer registry for each detection request.
+
+    Args:
+        session: Async database session.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        """Initialize CustomEntityRegistryService.
+
+        Args:
+            session: Async database session for entity type CRUD.
+        """
+        self._session = session
+        self._log: structlog.BoundLogger = get_logger(__name__)
+
+    async def create_entity_type(
+        self,
+        tenant_id: uuid.UUID,
+        name: str,
+        patterns: list[str],
+        context_words: list[str],
+        deny_list: list[str],
+        score: float = 0.85,
+    ) -> Any:
+        """Create a tenant-defined custom PII entity type.
+
+        Validates the regex patterns before persisting. Returns the created
+        CustomEntityType ORM instance.
+
+        Args:
+            tenant_id: Owning tenant.
+            name: Unique entity type name (e.g., "PHYSICIAN_NPI").
+            patterns: List of regex patterns for detection.
+            context_words: Words that increase detection confidence.
+            deny_list: Exact strings to always flag as this entity type.
+            score: Default confidence score when pattern matches (0-1).
+
+        Returns:
+            Persisted CustomEntityType ORM instance.
+
+        Raises:
+            ValueError: If any pattern is not a valid regex.
+        """
+        import re as _re
+
+        from aumos_text_engine.core.models import CustomEntityType
+
+        for pattern in patterns:
+            try:
+                _re.compile(pattern)
+            except _re.error as exc:
+                raise ValueError(f"Invalid regex pattern '{pattern}': {exc}") from exc
+
+        entity_type = CustomEntityType(
+            tenant_id=str(tenant_id),
+            name=name,
+            patterns=patterns,
+            context_words=context_words,
+            deny_list=deny_list,
+            score=score,
+            enabled=True,
+        )
+        self._session.add(entity_type)
+        await self._session.flush()
+        self._log.info("custom entity type created", name=name, tenant_id=str(tenant_id))
+        return entity_type
+
+    async def list_entity_types(
+        self,
+        tenant_id: uuid.UUID,
+        enabled_only: bool = True,
+    ) -> list[Any]:
+        """List all custom entity types for a tenant.
+
+        Args:
+            tenant_id: Tenant to list entity types for.
+            enabled_only: If True, only return enabled entity types.
+
+        Returns:
+            List of CustomEntityType ORM instances.
+        """
+        from sqlalchemy import select
+
+        from aumos_text_engine.core.models import CustomEntityType
+
+        stmt = select(CustomEntityType).where(
+            CustomEntityType.tenant_id == str(tenant_id)
+        )
+        if enabled_only:
+            stmt = stmt.where(CustomEntityType.enabled.is_(True))
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def get_entity_type(
+        self,
+        tenant_id: uuid.UUID,
+        entity_type_id: uuid.UUID,
+    ) -> Any:
+        """Get a specific custom entity type by ID.
+
+        Args:
+            tenant_id: Owning tenant.
+            entity_type_id: Entity type UUID.
+
+        Returns:
+            CustomEntityType ORM instance.
+
+        Raises:
+            NotFoundError: If not found for this tenant.
+        """
+        from sqlalchemy import select
+
+        from aumos_text_engine.core.models import CustomEntityType
+
+        stmt = (
+            select(CustomEntityType)
+            .where(CustomEntityType.id == entity_type_id)
+            .where(CustomEntityType.tenant_id == str(tenant_id))
+        )
+        result = await self._session.execute(stmt)
+        entity_type = result.scalar_one_or_none()
+        if entity_type is None:
+            raise NotFoundError(f"CustomEntityType {entity_type_id} not found")
+        return entity_type
+
+    async def delete_entity_type(
+        self,
+        tenant_id: uuid.UUID,
+        entity_type_id: uuid.UUID,
+    ) -> None:
+        """Soft-delete a custom entity type (sets enabled=False).
+
+        Args:
+            tenant_id: Owning tenant.
+            entity_type_id: Entity type UUID to disable.
+
+        Raises:
+            NotFoundError: If not found for this tenant.
+        """
+        entity_type = await self.get_entity_type(tenant_id, entity_type_id)
+        entity_type.enabled = False
+        await self._session.flush()
+        self._log.info(
+            "custom entity type disabled",
+            entity_type_id=str(entity_type_id),
+            name=entity_type.name,
+        )
+
+    async def load_into_analyzer(
+        self,
+        tenant_id: uuid.UUID,
+        analyzer: Any,
+    ) -> None:
+        """Register all enabled tenant entity types with a Presidio AnalyzerEngine.
+
+        Adds a PatternRecognizer per entity type, making custom patterns
+        available in the next analyze() call.
+
+        Args:
+            tenant_id: Tenant whose entity types to load.
+            analyzer: Presidio AnalyzerEngine instance to augment.
+        """
+        entity_types = await self.list_entity_types(tenant_id, enabled_only=True)
+        if not entity_types:
+            return
+
+        try:
+            from presidio_analyzer import Pattern, PatternRecognizer
+        except ImportError:
+            self._log.warning("presidio-analyzer not installed — cannot load custom entity types")
+            return
+
+        for entity_type in entity_types:
+            recognizer = PatternRecognizer(
+                supported_entity=entity_type.name,
+                patterns=[
+                    Pattern(name=entity_type.name, regex=p, score=entity_type.score)
+                    for p in entity_type.patterns
+                ],
+                context=entity_type.context_words,
+                deny_list=entity_type.deny_list if entity_type.deny_list else None,
+            )
+            analyzer.registry.add_recognizer(recognizer)
+
+        self._log.info(
+            "custom entity types loaded into analyzer",
+            count=len(entity_types),
+            tenant_id=str(tenant_id),
+        )

@@ -1,0 +1,137 @@
+[
+  {
+    "name": "Legal NDA",
+    "domain": "legal",
+    "prompt_template": "Generate a Non-Disclosure Agreement between {party_a} and {party_b}. The agreement should cover: confidential information scope, obligations of receiving party, term of {term} years, governing law of {jurisdiction}. Include standard carve-outs for publicly available information and prior knowledge. The agreement should be formal and legally precise.",
+    "example_documents": [],
+    "custom_entity_types": ["PARTY_NAME", "EFFECTIVE_DATE", "JURISDICTION"],
+    "is_platform_default": true,
+    "metadata": {"category": "legal", "subcategory": "nda", "complexity": "standard"}
+  },
+  {
+    "name": "Employment Agreement",
+    "domain": "legal",
+    "prompt_template": "Generate an employment agreement for a {job_title} position at {company_name}. Include: job responsibilities, compensation of {salary} per year, benefits, non-compete clause with {noncompete_radius} mile radius, intellectual property assignment, at-will employment clause, governing law of {jurisdiction}.",
+    "example_documents": [],
+    "custom_entity_types": ["EMPLOYEE_NAME", "EMPLOYER_NAME", "COMPENSATION"],
+    "is_platform_default": true,
+    "metadata": {"category": "legal", "subcategory": "employment", "complexity": "standard"}
+  },
+  {
+    "name": "Privacy Notice (GDPR)",
+    "domain": "legal",
+    "prompt_template": "Generate a GDPR-compliant privacy notice for {organization_name}. Cover: data controller identity, types of personal data collected ({data_types}), legal basis for processing, data subject rights (access, rectification, erasure, portability), international transfers, retention periods, contact information for DPO.",
+    "example_documents": [],
+    "custom_entity_types": ["ORGANIZATION_NAME", "DPO_CONTACT", "SUPERVISORY_AUTHORITY"],
+    "is_platform_default": true,
+    "metadata": {"category": "legal", "subcategory": "privacy", "regulation": "GDPR"}
+  },
+  {
+    "name": "Legal Case Summary",
+    "domain": "legal",
+    "prompt_template": "Generate a legal case summary for a {case_type} matter. Include: case caption, procedural history, key facts, legal issues presented, holding, reasoning, and practical implications. The summary should be written for a {audience} audience.",
+    "example_documents": [],
+    "custom_entity_types": ["CASE_NUMBER", "COURT_NAME", "JUDGE_NAME"],
+    "is_platform_default": true,
+    "metadata": {"category": "legal", "subcategory": "case_summary"}
+  },
+  {
+    "name": "Master Services Agreement",
+    "domain": "legal",
+    "prompt_template": "Generate a Master Services Agreement between {client_name} and {vendor_name} for {service_description}. Include: statement of work process, payment terms of Net {payment_days}, IP ownership, indemnification, limitation of liability at {liability_cap}, SLA commitments, termination provisions.",
+    "example_documents": [],
+    "custom_entity_types": ["CLIENT_NAME", "VENDOR_NAME", "CONTRACT_VALUE"],
+    "is_platform_default": true,
+    "metadata": {"category": "legal", "subcategory": "msa"}
+  },
+  {
+    "name": "Clinical Progress Note",
+    "domain": "medical",
+    "prompt_template": "Generate a clinical progress note for a {specialty} patient visit. Include SOAP format: Subjective (chief complaint: {chief_complaint}), Objective (vitals, exam findings), Assessment ({diagnoses}), Plan (medications: {medications}, follow-up in {followup_period}). Note should comply with HIPAA and avoid identifying information.",
+    "example_documents": [],
+    "custom_entity_types": ["DIAGNOSIS_CODE", "MEDICATION_NAME", "PROVIDER_NPI"],
+    "is_platform_default": true,
+    "metadata": {"category": "medical", "subcategory": "progress_note", "format": "SOAP"}
+  },
+  {
+    "name": "Hospital Discharge Summary",
+    "domain": "medical",
+    "prompt_template": "Generate a hospital discharge summary for a patient admitted for {admission_diagnosis}. Include: admission date, discharge date, principal diagnosis, procedures performed ({procedures}), discharge medications, discharge instructions, follow-up appointments, and attending physician attestation.",
+    "example_documents": [],
+    "custom_entity_types": ["DIAGNOSIS_CODE", "PROCEDURE_CODE", "PROVIDER_NPI"],
+    "is_platform_default": true,
+    "metadata": {"category": "medical", "subcategory": "discharge_summary"}
+  },
+  {
+    "name": "Laboratory Report",
+    "domain": "medical",
+    "prompt_template": "Generate a laboratory report for {test_panel} testing. Include: specimen type, collection date/time, reference ranges, result values, abnormal flags, interpretation by {lab_director_title}, QC indicators, and ordering provider information.",
+    "example_documents": [],
+    "custom_entity_types": ["LAB_ACCESSION_NUMBER", "PROVIDER_NPI", "SPECIMEN_ID"],
+    "is_platform_default": true,
+    "metadata": {"category": "medical", "subcategory": "lab_report"}
+  },
+  {
+    "name": "Radiology Report",
+    "domain": "medical",
+    "prompt_template": "Generate a radiology report for a {modality} study of the {anatomy}. Include: clinical indication, technique, comparison studies, findings (systematic review of all structures), impression with key findings, and recommendations. Written at {complexity} complexity level.",
+    "example_documents": [],
+    "custom_entity_types": ["ACCESSION_NUMBER", "RADIOLOGIST_NPI", "STUDY_DATE"],
+    "is_platform_default": true,
+    "metadata": {"category": "medical", "subcategory": "radiology_report"}
+  },
+  {
+    "name": "Earnings Call Transcript",
+    "domain": "financial",
+    "prompt_template": "Generate an earnings call transcript for {company_name} Q{quarter} {year} results. Include: opening remarks by CEO ({ceo_name}), CFO financial review (revenue: {revenue}, EPS: {eps}, guidance: {guidance}), analyst Q&A section with {num_analysts} analysts, and closing remarks. Use realistic financial language.",
+    "example_documents": [],
+    "custom_entity_types": ["TICKER_SYMBOL", "EXECUTIVE_NAME", "FINANCIAL_METRIC"],
+    "is_platform_default": true,
+    "metadata": {"category": "financial", "subcategory": "earnings_call"}
+  },
+  {
+    "name": "Loan Application",
+    "domain": "financial",
+    "prompt_template": "Generate a commercial loan application for {applicant_entity} requesting {loan_amount} for {loan_purpose}. Include: business description, financial statements summary (revenue: {annual_revenue}, EBITDA: {ebitda}), collateral description, management team, use of proceeds, repayment source, and certifications.",
+    "example_documents": [],
+    "custom_entity_types": ["BORROWER_EIN", "OFFICER_SSN", "COLLATERAL_DESCRIPTION"],
+    "is_platform_default": true,
+    "metadata": {"category": "financial", "subcategory": "loan_application"}
+  },
+  {
+    "name": "Compliance Report (SOX)",
+    "domain": "financial",
+    "prompt_template": "Generate a SOX Section 404 internal controls assessment report for {company_name} for fiscal year {fiscal_year}. Include: management's assessment of ICFR effectiveness, material weaknesses identified ({material_weaknesses}), remediation plans, auditor attestation reference, and COSO framework alignment.",
+    "example_documents": [],
+    "custom_entity_types": ["COMPANY_EIN", "AUDITOR_NAME", "CONTROL_DEFICIENCY"],
+    "is_platform_default": true,
+    "metadata": {"category": "financial", "subcategory": "sox_report", "regulation": "SOX"}
+  },
+  {
+    "name": "SEC 10-K Risk Factors",
+    "domain": "financial",
+    "prompt_template": "Generate SEC 10-K Item 1A Risk Factors for {company_name} in the {industry} industry. Include {num_risk_factors} material risk factors covering: business risks, financial risks, regulatory risks, technology risks, and macro-economic risks. Each risk factor should have a title and detailed explanation.",
+    "example_documents": [],
+    "custom_entity_types": ["COMPANY_NAME", "TICKER_SYMBOL", "REGULATORY_BODY"],
+    "is_platform_default": true,
+    "metadata": {"category": "financial", "subcategory": "10k_risk_factors", "regulation": "SEC"}
+  },
+  {
+    "name": "Investment Research Report",
+    "domain": "financial",
+    "prompt_template": "Generate an equity research report for {ticker_symbol} ({company_name}). Include: executive summary, investment thesis, industry analysis, financial model summary (DCF target: {price_target}), risk factors, ESG considerations, and rating ({rating}: Buy/Hold/Sell) with 12-month price target.",
+    "example_documents": [],
+    "custom_entity_types": ["TICKER_SYMBOL", "ANALYST_NAME", "PRICE_TARGET"],
+    "is_platform_default": true,
+    "metadata": {"category": "financial", "subcategory": "research_report"}
+  },
+  {
+    "name": "AML Suspicious Activity Report",
+    "domain": "financial",
+    "prompt_template": "Generate a Bank Secrecy Act Suspicious Activity Report (SAR) narrative for suspicious {activity_type} activity. Include: subject description, account activity summary over {time_period}, why activity is suspicious, any prior contact with law enforcement, and filing institution attestation. Do not include real identifying information.",
+    "example_documents": [],
+    "custom_entity_types": ["ACCOUNT_NUMBER", "TRANSACTION_ID", "FILING_INSTITUTION"],
+    "is_platform_default": true,
+    "metadata": {"category": "financial", "subcategory": "sar", "regulation": "BSA/AML"}
+  }
+]
